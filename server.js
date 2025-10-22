@@ -333,6 +333,226 @@ app.get('/api/employees/:id', async (req, res) => {
   }
 });
 
+// ==================== ADMIN: CREATE EMPLOYEE ====================
+
+app.post('/api/employees', async (req, res) => {
+  try {
+    const {
+      empNumber,
+      username,
+      name,
+      email,
+      role,
+      managerId,
+      workingDays,
+      holidays,
+      leavesEntitled,
+      casualLeave,
+      sickLeave,
+      earnedLeave,
+      privilegeLeave,
+      maternityLeave,
+      paternityLeave,
+      compensatoryOff
+    } = req.body;
+
+    console.log('📝 Creating new employee:', { name, email, role });
+
+    // Check if email already exists
+    const emailCheck = await pool.query('SELECT id FROM employees WHERE email = $1', [email]);
+    if (emailCheck.rows.length > 0) {
+      return res.status(400).json({ error: 'Email already exists' });
+    }
+
+    // Check if emp_number already exists
+    if (empNumber) {
+      const empNumCheck = await pool.query('SELECT id FROM employees WHERE emp_number = $1', [empNumber]);
+      if (empNumCheck.rows.length > 0) {
+        return res.status(400).json({ error: 'Employee number already exists' });
+      }
+    }
+
+    const insertQuery = `
+      INSERT INTO employees (
+        emp_number, username, name, email, role, manager_id,
+        working_days, holidays, leaves_entitled, leaves_taken,
+        casual_leave, sick_leave, earned_leave, privilege_leave,
+        maternity_leave, paternity_leave, compensatory_off, leave_without_pay
+      ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, 0, $10, $11, $12, $13, $14, $15, $16, 0)
+      RETURNING *
+    `;
+
+    const result = await pool.query(insertQuery, [
+      empNumber,
+      username,
+      name,
+      email,
+      role,
+      managerId || null,
+      workingDays || 260,
+      holidays || 15,
+      leavesEntitled || 20,
+      casualLeave || 4,
+      sickLeave || 4,
+      earnedLeave || 4,
+      privilegeLeave || 4,
+      maternityLeave || 0,
+      paternityLeave || 0,
+      compensatoryOff || 4
+    ]);
+
+    console.log('✅ Employee created successfully:', result.rows[0].id);
+    res.status(201).json(result.rows[0]);
+  } catch (error) {
+    console.error('❌ Error creating employee:', error);
+    res.status(500).json({ error: 'Failed to create employee', details: error.message });
+  }
+});
+
+// ==================== ADMIN: UPDATE EMPLOYEE ====================
+
+app.put('/api/employees/:id', async (req, res) => {
+  try {
+    const { id } = req.params;
+    const {
+      empNumber,
+      username,
+      name,
+      email,
+      role,
+      managerId,
+      workingDays,
+      holidays,
+      leavesEntitled,
+      leavesTaken,
+      casualLeave,
+      sickLeave,
+      earnedLeave,
+      privilegeLeave,
+      maternityLeave,
+      paternityLeave,
+      compensatoryOff,
+      leaveWithoutPay
+    } = req.body;
+
+    console.log('📝 Updating employee:', id);
+
+    // Check if employee exists
+    const empCheck = await pool.query('SELECT * FROM employees WHERE id = $1', [id]);
+    if (empCheck.rows.length === 0) {
+      return res.status(404).json({ error: 'Employee not found' });
+    }
+
+    // Check if email is being changed to an existing one
+    const emailCheck = await pool.query('SELECT id FROM employees WHERE email = $1 AND id != $2', [email, id]);
+    if (emailCheck.rows.length > 0) {
+      return res.status(400).json({ error: 'Email already exists' });
+    }
+
+    const updateQuery = `
+      UPDATE employees SET
+        emp_number = $1,
+        username = $2,
+        name = $3,
+        email = $4,
+        role = $5,
+        manager_id = $6,
+        working_days = $7,
+        holidays = $8,
+        leaves_entitled = $9,
+        leaves_taken = $10,
+        casual_leave = $11,
+        sick_leave = $12,
+        earned_leave = $13,
+        privilege_leave = $14,
+        maternity_leave = $15,
+        paternity_leave = $16,
+        compensatory_off = $17,
+        leave_without_pay = $18,
+        updated_at = CURRENT_TIMESTAMP
+      WHERE id = $19
+      RETURNING *
+    `;
+
+    const result = await pool.query(updateQuery, [
+      empNumber,
+      username,
+      name,
+      email,
+      role,
+      managerId || null,
+      workingDays || 260,
+      holidays || 15,
+      leavesEntitled || 20,
+      leavesTaken || 0,
+      casualLeave || 4,
+      sickLeave || 4,
+      earnedLeave || 4,
+      privilegeLeave || 4,
+      maternityLeave || 0,
+      paternityLeave || 0,
+      compensatoryOff || 4,
+      leaveWithoutPay || 0,
+      id
+    ]);
+
+    console.log('✅ Employee updated successfully:', id);
+    res.json(result.rows[0]);
+  } catch (error) {
+    console.error('❌ Error updating employee:', error);
+    res.status(500).json({ error: 'Failed to update employee', details: error.message });
+  }
+});
+
+// ==================== ADMIN: DELETE EMPLOYEE ====================
+
+app.delete('/api/employees/:id', async (req, res) => {
+  try {
+    const { id } = req.params;
+
+    console.log('🗑️  Deleting employee:', id);
+
+    // Check if employee exists
+    const empCheck = await pool.query('SELECT * FROM employees WHERE id = $1', [id]);
+    if (empCheck.rows.length === 0) {
+      return res.status(404).json({ error: 'Employee not found' });
+    }
+
+    // Check if employee has pending leave applications
+    const leaveCheck = await pool.query(
+      'SELECT COUNT(*) as count FROM leave_applications WHERE employee_id = $1 AND status = $2',
+      [id, 'pending']
+    );
+
+    if (parseInt(leaveCheck.rows[0].count) > 0) {
+      return res.status(400).json({ 
+        error: 'Cannot delete employee with pending leave applications. Please resolve them first.' 
+      });
+    }
+
+    // Check if employee is a manager
+    const managerCheck = await pool.query(
+      'SELECT COUNT(*) as count FROM employees WHERE manager_id = $1',
+      [id]
+    );
+
+    if (parseInt(managerCheck.rows[0].count) > 0) {
+      return res.status(400).json({ 
+        error: 'Cannot delete employee who is managing other employees. Please reassign their team first.' 
+      });
+    }
+
+    // Delete employee (CASCADE will handle leave applications)
+    await pool.query('DELETE FROM employees WHERE id = $1', [id]);
+
+    console.log('✅ Employee deleted successfully:', id);
+    res.json({ message: 'Employee deleted successfully' });
+  } catch (error) {
+    console.error('❌ Error deleting employee:', error);
+    res.status(500).json({ error: 'Failed to delete employee', details: error.message });
+  }
+});
+
 // ==================== LEAVE APPLICATIONS ====================
 
 app.post('/api/leave-applications', async (req, res) => {
