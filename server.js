@@ -288,7 +288,235 @@ app.post('/api/auth/microsoft/callback', async (req, res) => {
     res.status(500).json({ error: 'Internal server error' });
   }
 });
+// ==================== PASSWORD RESET & CHANGE PASSWORD ROUTES ====================
 
+const crypto = require('crypto');
+
+// Store reset tokens temporarily (in production, use Redis or database)
+const resetTokens = new Map();
+
+// Request Password Reset
+app.post('/api/auth/reset-password', async (req, res) => {
+  try {
+    const { email } = req.body;
+    
+    if (!email) {
+      return res.status(400).json({ message: 'Email is required' });
+    }
+
+    console.log('🔐 Password reset requested for:', email);
+
+    // Check if employee exists
+    const result = await pool.query(
+      'SELECT * FROM employees WHERE LOWER(email) = LOWER($1)',
+      [email]
+    );
+
+    if (result.rows.length === 0) {
+      // For security, don't reveal if email exists or not
+      return res.json({ message: 'If that email exists, a reset link has been sent' });
+    }
+
+    const employee = result.rows[0];
+
+    // Generate reset token
+    const resetToken = crypto.randomBytes(32).toString('hex');
+    const resetExpiry = Date.now() + 3600000; // 1 hour
+
+    // Store token
+    resetTokens.set(resetToken, {
+      email: employee.email,
+      expiry: resetExpiry
+    });
+
+    // Create reset link - UPDATE THIS URL AFTER CREATING RESET PAGE
+    const resetLink = `https://soenaudio.netlify.app/reset-password.html?token=${resetToken}`;
+
+    // Send email
+    const subject = 'Password Reset Request - SOEN Audio';
+    const html = `
+      <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto;">
+        <h2 style="color: #F17926;">Password Reset Request</h2>
+        
+        <p>Hello ${employee.name},</p>
+        
+        <p>We received a request to reset your password for your SOEN Audio Leave Management account.</p>
+        
+        <p>Click the button below to reset your password:</p>
+        
+        <div style="text-align: center; margin: 30px 0;">
+          <a href="${resetLink}" style="background-color: #F17926; color: white; padding: 12px 30px; text-decoration: none; border-radius: 8px; display: inline-block;">
+            Reset Password
+          </a>
+        </div>
+        
+        <p>Or copy and paste this link into your browser:</p>
+        <p style="background-color: #f5f5f5; padding: 10px; border-radius: 4px; word-break: break-all; font-size: 12px;">
+          ${resetLink}
+        </p>
+        
+        <p style="color: #dc3545; margin-top: 20px;">
+          <strong>This link will expire in 1 hour.</strong>
+        </p>
+        
+        <p>If you didn't request this password reset, please ignore this email or contact <a href="mailto:rajesh@soenaudio.com">rajesh@soenaudio.com</a> if you have concerns.</p>
+        
+        <p style="color: #666; font-size: 12px; margin-top: 30px;">
+          This is an automated email from SOEN Audio Leave Management System.
+        </p>
+      </div>
+    `;
+
+    const emailResult = await sendEmail(employee.email, subject, html);
+
+    if (emailResult.success) {
+      console.log('✅ Password reset email sent to:', employee.email);
+      res.json({ message: 'Password reset link sent to your email' });
+    } else {
+      console.error('❌ Failed to send reset email');
+      res.status(500).json({ message: 'Failed to send reset email' });
+    }
+
+  } catch (error) {
+    console.error('❌ Password reset error:', error);
+    res.status(500).json({ message: 'Server error' });
+  }
+});
+
+// Verify Reset Token
+app.get('/api/auth/verify-reset-token/:token', async (req, res) => {
+  try {
+    const { token } = req.params;
+
+    const tokenData = resetTokens.get(token);
+
+    if (!tokenData) {
+      return res.status(400).json({ valid: false, message: 'Invalid or expired token' });
+    }
+
+    if (Date.now() > tokenData.expiry) {
+      resetTokens.delete(token);
+      return res.status(400).json({ valid: false, message: 'Token has expired' });
+    }
+
+    res.json({ valid: true, email: tokenData.email });
+
+  } catch (error) {
+    console.error('❌ Token verification error:', error);
+    res.status(500).json({ valid: false, message: 'Server error' });
+  }
+});
+
+// Complete Password Reset
+app.post('/api/auth/complete-reset', async (req, res) => {
+  try {
+    const { token, newPassword } = req.body;
+
+    if (!token || !newPassword) {
+      return res.status(400).json({ message: 'Token and new password are required' });
+    }
+
+    if (newPassword.length < 8) {
+      return res.status(400).json({ message: 'Password must be at least 8 characters' });
+    }
+
+    const tokenData = resetTokens.get(token);
+
+    if (!tokenData) {
+      return res.status(400).json({ message: 'Invalid or expired token' });
+    }
+
+    if (Date.now() > tokenData.expiry) {
+      resetTokens.delete(token);
+      return res.status(400).json({ message: 'Token has expired' });
+    }
+
+    // Update password in database
+    await pool.query(
+      'UPDATE employees SET password = $1 WHERE LOWER(email) = LOWER($2)',
+      [newPassword, tokenData.email]
+    );
+
+    // Delete used token
+    resetTokens.delete(token);
+
+    console.log('✅ Password reset completed for:', tokenData.email);
+
+    res.json({ message: 'Password reset successful' });
+
+  } catch (error) {
+    console.error('❌ Password reset completion error:', error);
+    res.status(500).json({ message: 'Server error' });
+  }
+});
+
+// Change Password (for logged-in users)
+app.post('/api/auth/change-password', async (req, res) => {
+  try {
+    const { email, currentPassword, newPassword } = req.body;
+
+    if (!email || !currentPassword || !newPassword) {
+      return res.status(400).json({ message: 'All fields are required' });
+    }
+
+    if (newPassword.length < 8) {
+      return res.status(400).json({ message: 'Password must be at least 8 characters' });
+    }
+
+    console.log('🔐 Password change requested for:', email);
+
+    // Verify current password
+    const result = await pool.query(
+      'SELECT * FROM employees WHERE LOWER(email) = LOWER($1)',
+      [email]
+    );
+
+    if (result.rows.length === 0) {
+      return res.status(404).json({ message: 'Employee not found' });
+    }
+
+    const employee = result.rows[0];
+
+    // Check current password
+    if (employee.password !== currentPassword) {
+      return res.status(401).json({ message: 'Current password is incorrect' });
+    }
+
+    // Update to new password
+    await pool.query(
+      'UPDATE employees SET password = $1 WHERE id = $2',
+      [newPassword, employee.id]
+    );
+
+    console.log('✅ Password changed successfully for:', email);
+
+    // Send confirmation email
+    const subject = 'Password Changed - SOEN Audio';
+    const html = `
+      <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto;">
+        <h2 style="color: #28a745;">Password Changed Successfully ✅</h2>
+        
+        <p>Hello ${employee.name},</p>
+        
+        <p>Your password has been changed successfully.</p>
+        
+        <p>If you didn't make this change, please contact <a href="mailto:rajesh@soenaudio.com">rajesh@soenaudio.com</a> immediately.</p>
+        
+        <p style="color: #666; font-size: 12px; margin-top: 30px;">
+          This is an automated email from SOEN Audio Leave Management System.
+        </p>
+      </div>
+    `;
+
+    await sendEmail(employee.email, subject, html);
+
+    res.json({ message: 'Password changed successfully' });
+
+  } catch (error) {
+    console.error('❌ Password change error:', error);
+    res.status(500).json({ message: 'Server error' });
+  }
+});
 // ==================== EMPLOYEES ====================
 
 app.get('/api/employees', async (req, res) => {
