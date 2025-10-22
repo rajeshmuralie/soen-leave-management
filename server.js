@@ -288,33 +288,7 @@ app.post('/api/auth/microsoft/callback', async (req, res) => {
     res.status(500).json({ error: 'Internal server error' });
   }
 });
-# 🔧 BACKEND: ADD PASSWORD RESET ENDPOINTS
 
-## ✅ **Frontend Status**
-
-The password reset page is working perfectly! The "Server error" you see is expected because the backend endpoints haven't been added yet.
-
-**What's Working:**
-- ✅ "Forgot Password?" link on login page
-- ✅ Email form and modal
-- ✅ reset-password.html page loads
-- ✅ Token verification attempt
-- ✅ Form validation
-
-**What Needs Backend:**
-- ⏳ Token verification endpoint
-- ⏳ Password reset endpoint
-- ⏳ Email sending
-
----
-
-## 📦 **Backend Code to Add**
-
-Add this code to your `server.js` file on Render:
-
-### **Location:** After the Microsoft OAuth section, before other API routes
-
-```javascript
 // ==================== PASSWORD RESET ENDPOINTS ====================
 
 const crypto = require('crypto');
