@@ -346,7 +346,22 @@ app.post('/api/leave-applications', async (req, res) => {
       reason
     } = req.body;
 
-    console.log('📝 New leave application:', { employeeId, leaveType, startDate, endDate });
+    console.log('📝 New leave application:', { employeeId, leaveType, startDate, endDate, daysRequested, reason });
+
+    // Validate inputs
+    if (!employeeId || !leaveType || !startDate || !endDate || !daysRequested || !reason) {
+      console.error('❌ Missing required fields');
+      return res.status(400).json({ error: 'All fields are required' });
+    }
+
+    // Check if employee exists
+    const employeeCheck = await pool.query('SELECT * FROM employees WHERE id = $1', [employeeId]);
+    if (employeeCheck.rows.length === 0) {
+      console.error('❌ Employee not found:', employeeId);
+      return res.status(404).json({ error: 'Employee not found' });
+    }
+
+    console.log('✅ Employee found:', employeeCheck.rows[0].name);
 
     // Insert leave application
     const insertQuery = `
@@ -357,32 +372,50 @@ app.post('/api/leave-applications', async (req, res) => {
       RETURNING *
     `;
 
+    console.log('💾 Inserting into database...');
     const result = await pool.query(insertQuery, [
       employeeId, leaveType, startDate, endDate, daysRequested, reason
     ]);
 
     const leaveApplication = result.rows[0];
+    console.log('✅ Leave record created:', leaveApplication.id);
 
     // Get employee details
-    const employeeResult = await pool.query('SELECT * FROM employees WHERE id = $1', [employeeId]);
-    const employee = employeeResult.rows[0];
+    const employee = employeeCheck.rows[0];
 
-    // Get manager details
+    // Get manager details and send email
     if (employee.manager_id) {
+      console.log('📧 Finding manager with ID:', employee.manager_id);
       const managerResult = await pool.query('SELECT * FROM employees WHERE id = $1', [employee.manager_id]);
       if (managerResult.rows.length > 0) {
         const manager = managerResult.rows[0];
+        console.log('✅ Manager found:', manager.name, manager.email);
         
         // Send email to manager
-        await sendLeaveApplicationEmail(leaveApplication, employee, manager);
+        try {
+          await sendLeaveApplicationEmail(leaveApplication, employee, manager);
+          console.log('✅ Email sent to manager');
+        } catch (emailError) {
+          console.error('⚠️  Email failed but leave created:', emailError.message);
+          // Don't fail the request if email fails
+        }
+      } else {
+        console.warn('⚠️  Manager not found for ID:', employee.manager_id);
       }
+    } else {
+      console.log('ℹ️  Employee has no manager (probably an owner)');
     }
 
     console.log('✅ Leave application created successfully');
     res.status(201).json(leaveApplication);
   } catch (error) {
     console.error('❌ Error creating leave application:', error);
-    res.status(500).json({ error: 'Failed to create leave application' });
+    console.error('Error details:', error.message);
+    console.error('Error stack:', error.stack);
+    res.status(500).json({ 
+      error: 'Failed to create leave application',
+      details: error.message 
+    });
   }
 });
 
