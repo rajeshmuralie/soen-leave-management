@@ -1,9 +1,20 @@
 const express = require('express');
 const cors = require('cors');
 const { Pool } = require('pg');
+const sgMail = require('@sendgrid/mail');
 
 const app = express();
 const PORT = process.env.PORT || 3001;
+
+// ==================== SENDGRID CONFIGURATION ====================
+if (process.env.SENDGRID_API_KEY) {
+  sgMail.setApiKey(process.env.SENDGRID_API_KEY);
+  console.log('✅ SendGrid configured');
+} else {
+  console.warn('⚠️  SendGrid API key not found - emails will not be sent');
+}
+
+const SENDER_EMAIL = process.env.SENDER_EMAIL || 'noreply@soenaudio.com';
 
 // Middleware
 app.use(cors({
@@ -52,13 +63,14 @@ const EMPLOYEE_STRUCTURE = {
     { id: 9, name: 'Rick', email: 'rick@soenaudio.com', role: 'employee', managerId: 1 },
     { id: 10, name: 'Bruce Ryan', email: 'bruce@soenaudio.com', role: 'employee', managerId: 1 },
     { id: 11, name: 'Nikki', email: 'nikki@soenaudio.com', role: 'employee', managerId: 1 },
+    { id: 55, name: 'TBD Employee', email: 'tbd@soenaudio.com', role: 'employee', managerId: 1 },
     // Reporting to Daniel (2 employees)
     { id: 12, name: 'Andy Yang', email: 'andy@soenaudio.com', role: 'employee', managerId: 2 },
     { id: 13, name: 'Jacky Wu', email: 'jacky@soenaudio.com', role: 'employee', managerId: 2 }
   ]
 };
 
-// Helper function to get all employees as flat array
+// Helper function to get all employees
 function getAllEmployees() {
   return [
     ...EMPLOYEE_STRUCTURE.owners,
@@ -73,9 +85,115 @@ function findEmployeeByEmail(email) {
   return getAllEmployees().find(emp => emp.email.toLowerCase() === normalizedEmail);
 }
 
-// ==================== AUTHENTICATION ====================
+// ==================== EMAIL SENDING FUNCTIONS ====================
 
-// Microsoft OAuth callback endpoint
+async function sendEmail(to, subject, html) {
+  if (!process.env.SENDGRID_API_KEY) {
+    console.log('📧 Email would be sent to:', to);
+    console.log('Subject:', subject);
+    return { success: false, message: 'SendGrid not configured' };
+  }
+
+  try {
+    const msg = {
+      to: to,
+      from: SENDER_EMAIL,
+      subject: subject,
+      html: html
+    };
+
+    await sgMail.send(msg);
+    console.log(`✅ Email sent successfully to ${to}`);
+    return { success: true };
+  } catch (error) {
+    console.error('❌ Error sending email:', error);
+    if (error.response) {
+      console.error(error.response.body);
+    }
+    return { success: false, error: error.message };
+  }
+}
+
+async function sendLeaveApplicationEmail(leave, employee, manager) {
+  const subject = `New Leave Application from ${employee.name}`;
+  const html = `
+    <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto;">
+      <h2 style="color: #F17926;">New Leave Application</h2>
+      
+      <div style="background-color: #f5f5f5; padding: 20px; border-radius: 8px; margin: 20px 0;">
+        <p><strong>Employee:</strong> ${employee.name}</p>
+        <p><strong>Email:</strong> ${employee.email}</p>
+        <p><strong>Leave Type:</strong> ${leave.leave_type}</p>
+        <p><strong>Start Date:</strong> ${leave.start_date}</p>
+        <p><strong>End Date:</strong> ${leave.end_date}</p>
+        <p><strong>Days Requested:</strong> ${leave.days_requested}</p>
+        <p><strong>Reason:</strong> ${leave.reason}</p>
+      </div>
+      
+      <p>Please review and approve/reject this leave application in the <a href="${process.env.FRONTEND_URL || 'https://soenaudio.netlify.app'}">Leave Management System</a>.</p>
+      
+      <p style="color: #666; font-size: 12px;">This is an automated email from SOEN Audio Leave Management System.</p>
+    </div>
+  `;
+
+  return await sendEmail(manager.email, subject, html);
+}
+
+async function sendLeaveApprovalEmail(leave, employee) {
+  const subject = `Your Leave Application has been Approved`;
+  const html = `
+    <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto;">
+      <h2 style="color: #28a745;">Leave Approved ✅</h2>
+      
+      <p>Dear ${employee.name},</p>
+      
+      <p>Your leave application has been <strong>approved</strong>.</p>
+      
+      <div style="background-color: #f5f5f5; padding: 20px; border-radius: 8px; margin: 20px 0;">
+        <p><strong>Leave Type:</strong> ${leave.leave_type}</p>
+        <p><strong>Start Date:</strong> ${leave.start_date}</p>
+        <p><strong>End Date:</strong> ${leave.end_date}</p>
+        <p><strong>Days:</strong> ${leave.days_requested}</p>
+      </div>
+      
+      <p>Your leave balance has been updated accordingly.</p>
+      
+      <p style="color: #666; font-size: 12px;">This is an automated email from SOEN Audio Leave Management System.</p>
+    </div>
+  `;
+
+  return await sendEmail(employee.email, subject, html);
+}
+
+async function sendLeaveRejectionEmail(leave, employee, reason) {
+  const subject = `Your Leave Application has been Rejected`;
+  const html = `
+    <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto;">
+      <h2 style="color: #dc3545;">Leave Rejected ❌</h2>
+      
+      <p>Dear ${employee.name},</p>
+      
+      <p>Your leave application has been <strong>rejected</strong>.</p>
+      
+      <div style="background-color: #f5f5f5; padding: 20px; border-radius: 8px; margin: 20px 0;">
+        <p><strong>Leave Type:</strong> ${leave.leave_type}</p>
+        <p><strong>Start Date:</strong> ${leave.start_date}</p>
+        <p><strong>End Date:</strong> ${leave.end_date}</p>
+        <p><strong>Days:</strong> ${leave.days_requested}</p>
+        ${reason ? `<p><strong>Reason for Rejection:</strong> ${reason}</p>` : ''}
+      </div>
+      
+      <p>If you have any questions, please contact your manager.</p>
+      
+      <p style="color: #666; font-size: 12px;">This is an automated email from SOEN Audio Leave Management System.</p>
+    </div>
+  `;
+
+  return await sendEmail(employee.email, subject, html);
+}
+
+// ==================== MICROSOFT OAUTH ====================
+
 app.post('/api/auth/microsoft/callback', async (req, res) => {
   try {
     const { email, name } = req.body;
@@ -84,129 +202,65 @@ app.post('/api/auth/microsoft/callback', async (req, res) => {
       return res.status(400).json({ error: 'Email is required' });
     }
 
-    console.log('🔐 Microsoft login attempt for:', email);
+    console.log('🔐 Microsoft OAuth callback received for:', email);
 
-    // Find employee by email
-    const employee = findEmployeeByEmail(email);
+    // Find employee in our structure
+    const employeeInStructure = findEmployeeByEmail(email);
     
-    if (!employee) {
-      console.log('❌ Employee not found for email:', email);
-      return res.status(404).json({ 
-        error: 'Employee not found. Please contact administrator.' 
-      });
+    if (!employeeInStructure) {
+      console.log('❌ Employee not found in structure:', email);
+      return res.status(404).json({ error: 'Employee not found in organization' });
     }
 
-    // Fetch full employee data from database
-    const dbQuery = 'SELECT * FROM employees WHERE LOWER(email) = LOWER($1)';
-    const dbResult = await pool.query(dbQuery, [email]);
-    
-    if (dbResult.rows.length === 0) {
-      console.log('⚠️  Employee found in structure but not in database:', email);
-      console.log('📝 Creating employee record in database...');
-      
-      // Insert employee into database
-      const insertQuery = `
-        INSERT INTO employees (
-          emp_number, username, name, email, role, manager_id,
-          working_days, holidays, leaves_entitled, leaves_taken,
-          casual_leave, sick_leave, earned_leave, privilege_leave,
-          maternity_leave, paternity_leave, compensatory_off, leave_without_pay
-        ) VALUES (
-          $1, $2, $3, $4, $5, $6, 260, 15, 
-          $7, 0, 5, 5, 5, 5, 0, 0, 0, 0
-        ) RETURNING *
-      `;
-      
-      const empNumber = `EMP${String(employee.id).padStart(3, '0')}`;
-      const username = employee.email.split('@')[0];
-      const leavesEntitled = employee.role === 'owner' ? 30 : employee.role === 'admin' ? 25 : 20;
-      
-      const insertResult = await pool.query(insertQuery, [
-        empNumber, username, employee.name, employee.email, 
-        employee.role, employee.managerId, leavesEntitled
-      ]);
-      
-      const userData = insertResult.rows[0];
-      console.log('✅ Employee created in database:', userData.name);
-      
-      return res.json({
-        success: true,
-        user: {
-          id: userData.id,
-          empNumber: userData.emp_number,
-          name: userData.name,
-          email: userData.email,
-          role: userData.role,
-          managerId: userData.manager_id,
-          leavesEntitled: userData.leaves_entitled,
-          leavesTaken: userData.leaves_taken,
-          leavesRemaining: userData.leaves_entitled - userData.leaves_taken
-        }
-      });
-    }
+    console.log('✅ Employee found in structure:', employeeInStructure.name);
 
-    const userData = dbResult.rows[0];
-    console.log('✅ Login successful:', userData.name, `(${userData.role})`);
-
-    res.json({
-      success: true,
-      user: {
-        id: userData.id,
-        empNumber: userData.emp_number,
-        name: userData.name,
-        email: userData.email,
-        role: userData.role,
-        managerId: userData.manager_id,
-        leavesEntitled: userData.leaves_entitled,
-        leavesTaken: userData.leaves_taken,
-        leavesRemaining: userData.leaves_entitled - userData.leaves_taken,
-        // Leave breakdown
-        casualLeave: userData.casual_leave,
-        sickLeave: userData.sick_leave,
-        earnedLeave: userData.earned_leave,
-        privilegeLeave: userData.privilege_leave,
-        maternityLeave: userData.maternity_leave,
-        paternityLeave: userData.paternity_leave,
-        compensatoryOff: userData.compensatory_off,
-        leaveWithoutPay: userData.leave_without_pay
-      }
-    });
-
-  } catch (error) {
-    console.error('❌ Microsoft auth error:', error);
-    res.status(500).json({ error: 'Authentication failed', details: error.message });
-  }
-});
-
-// Regular login endpoint (for testing)
-app.post('/api/auth/login', async (req, res) => {
-  try {
-    const { email, password } = req.body;
-    
-    console.log('🔐 Regular login attempt for:', email);
-    
-    // Find employee in structure
-    const employee = findEmployeeByEmail(email);
-    
-    if (!employee) {
-      return res.status(404).json({ error: 'Employee not found' });
-    }
-
-    // In production, validate password properly
-    // For now, accept any password or 'password123'
-    
-    // Fetch from database
+    // Check if employee exists in database
     const result = await pool.query(
       'SELECT * FROM employees WHERE LOWER(email) = LOWER($1)',
       [email]
     );
-    
+
+    let userData;
+
     if (result.rows.length === 0) {
-      return res.status(404).json({ error: 'Employee not found in database' });
+      // Employee exists in structure but not in database - auto-create
+      console.log('📝 Creating employee in database:', email);
+      
+      const insertResult = await pool.query(`
+        INSERT INTO employees (
+          emp_number, username, name, email, role, manager_id,
+          working_days, holidays, leaves_entitled, leaves_taken,
+          casual_leave, sick_leave, earned_leave, privilege_leave
+        ) VALUES ($1, $2, $3, $4, $5, $6, 260, 15, $7, 0, 4, 4, 4, 4)
+        RETURNING *
+      `, [
+        `EMP${employeeInStructure.id.toString().padStart(3, '0')}`,
+        employeeInStructure.name.toLowerCase().split(' ')[0],
+        employeeInStructure.name,
+        employeeInStructure.email,
+        employeeInStructure.role,
+        employeeInStructure.managerId,
+        employeeInStructure.role === 'owner' ? 30 : employeeInStructure.role === 'admin' ? 25 : 20
+      ]);
+
+      userData = insertResult.rows[0];
+      console.log('✅ Employee created in database');
+    } else {
+      userData = result.rows[0];
+      console.log('✅ Employee found in database');
     }
 
-    const userData = result.rows[0];
-    console.log('✅ Login successful:', userData.name);
+    // Find manager details
+    let managerData = null;
+    if (userData.manager_id) {
+      const managerResult = await pool.query(
+        'SELECT * FROM employees WHERE id = $1',
+        [userData.manager_id]
+      );
+      if (managerResult.rows.length > 0) {
+        managerData = managerResult.rows[0];
+      }
+    }
 
     res.json({
       success: true,
@@ -217,33 +271,37 @@ app.post('/api/auth/login', async (req, res) => {
         email: userData.email,
         role: userData.role,
         managerId: userData.manager_id,
+        managerName: managerData ? managerData.name : null,
+        workingDays: userData.working_days,
+        holidays: userData.holidays,
         leavesEntitled: userData.leaves_entitled,
         leavesTaken: userData.leaves_taken,
-        leavesRemaining: userData.leaves_entitled - userData.leaves_taken
+        leavesRemaining: userData.leaves_entitled - userData.leaves_taken,
+        casualLeave: userData.casual_leave,
+        sickLeave: userData.sick_leave,
+        earnedLeave: userData.earned_leave,
+        privilegeLeave: userData.privilege_leave
       }
     });
-
   } catch (error) {
-    console.error('❌ Login error:', error);
-    res.status(500).json({ error: 'Login failed', details: error.message });
+    console.error('❌ Error in Microsoft OAuth:', error);
+    res.status(500).json({ error: 'Internal server error' });
   }
 });
 
 // ==================== EMPLOYEES ====================
 
-// Get all employees
 app.get('/api/employees', async (req, res) => {
   try {
     const result = await pool.query(`
       SELECT 
         e.*,
-        (e.leaves_entitled - e.leaves_taken) as leaves_remaining,
-        m.name as manager_name
+        m.name as manager_name,
+        (e.leaves_entitled - e.leaves_taken) as leaves_remaining
       FROM employees e
       LEFT JOIN employees m ON e.manager_id = m.id
       ORDER BY e.id
     `);
-    
     res.json(result.rows);
   } catch (error) {
     console.error('❌ Error fetching employees:', error);
@@ -251,15 +309,14 @@ app.get('/api/employees', async (req, res) => {
   }
 });
 
-// Get employee by ID
 app.get('/api/employees/:id', async (req, res) => {
   try {
     const { id } = req.params;
     const result = await pool.query(`
       SELECT 
         e.*,
-        (e.leaves_entitled - e.leaves_taken) as leaves_remaining,
-        m.name as manager_name
+        m.name as manager_name,
+        (e.leaves_entitled - e.leaves_taken) as leaves_remaining
       FROM employees e
       LEFT JOIN employees m ON e.manager_id = m.id
       WHERE e.id = $1
@@ -276,29 +333,59 @@ app.get('/api/employees/:id', async (req, res) => {
   }
 });
 
-// Get team members (direct reports)
-app.get('/api/employees/:id/team', async (req, res) => {
+// ==================== LEAVE APPLICATIONS ====================
+
+app.post('/api/leave-applications', async (req, res) => {
   try {
-    const { id } = req.params;
-    const result = await pool.query(`
-      SELECT 
-        e.*,
-        (e.leaves_entitled - e.leaves_taken) as leaves_remaining
-      FROM employees e
-      WHERE e.manager_id = $1
-      ORDER BY e.name
-    `, [id]);
-    
-    res.json(result.rows);
+    const {
+      employeeId,
+      leaveType,
+      startDate,
+      endDate,
+      daysRequested,
+      reason
+    } = req.body;
+
+    console.log('📝 New leave application:', { employeeId, leaveType, startDate, endDate });
+
+    // Insert leave application
+    const insertQuery = `
+      INSERT INTO leave_applications (
+        employee_id, leave_type, start_date, end_date, 
+        days_requested, reason, status, applied_at
+      ) VALUES ($1, $2, $3, $4, $5, $6, 'pending', CURRENT_TIMESTAMP)
+      RETURNING *
+    `;
+
+    const result = await pool.query(insertQuery, [
+      employeeId, leaveType, startDate, endDate, daysRequested, reason
+    ]);
+
+    const leaveApplication = result.rows[0];
+
+    // Get employee details
+    const employeeResult = await pool.query('SELECT * FROM employees WHERE id = $1', [employeeId]);
+    const employee = employeeResult.rows[0];
+
+    // Get manager details
+    if (employee.manager_id) {
+      const managerResult = await pool.query('SELECT * FROM employees WHERE id = $1', [employee.manager_id]);
+      if (managerResult.rows.length > 0) {
+        const manager = managerResult.rows[0];
+        
+        // Send email to manager
+        await sendLeaveApplicationEmail(leaveApplication, employee, manager);
+      }
+    }
+
+    console.log('✅ Leave application created successfully');
+    res.status(201).json(leaveApplication);
   } catch (error) {
-    console.error('❌ Error fetching team:', error);
-    res.status(500).json({ error: 'Failed to fetch team members' });
+    console.error('❌ Error creating leave application:', error);
+    res.status(500).json({ error: 'Failed to create leave application' });
   }
 });
 
-// ==================== LEAVE APPLICATIONS ====================
-
-// Get leave applications
 app.get('/api/leave-applications', async (req, res) => {
   try {
     const { employeeId, managerId, status } = req.query;
@@ -308,16 +395,13 @@ app.get('/api/leave-applications', async (req, res) => {
         la.*,
         e.name as employee_name,
         e.email as employee_email,
-        e.role as employee_role,
-        m.name as manager_name,
-        a.name as approved_by_name
+        e.manager_id,
+        m.name as manager_name
       FROM leave_applications la
       JOIN employees e ON la.employee_id = e.id
       LEFT JOIN employees m ON e.manager_id = m.id
-      LEFT JOIN employees a ON la.approved_by = a.id
       WHERE 1=1
     `;
-    
     const params = [];
     
     if (employeeId) {
@@ -335,7 +419,7 @@ app.get('/api/leave-applications', async (req, res) => {
       query += ` AND la.status = $${params.length}`;
     }
     
-    query += ' ORDER BY la.created_at DESC';
+    query += ' ORDER BY la.applied_at DESC';
     
     const result = await pool.query(query, params);
     res.json(result.rows);
@@ -345,60 +429,16 @@ app.get('/api/leave-applications', async (req, res) => {
   }
 });
 
-// Create leave application
-app.post('/api/leave-applications', async (req, res) => {
-  try {
-    const { employeeId, leaveType, startDate, endDate, daysRequested, reason } = req.body;
-    
-    // Validate employee exists
-    const empCheck = await pool.query('SELECT * FROM employees WHERE id = $1', [employeeId]);
-    if (empCheck.rows.length === 0) {
-      return res.status(404).json({ error: 'Employee not found' });
-    }
-    
-    const employee = empCheck.rows[0];
-    
-    // Check leave balance
-    const remainingLeaves = employee.leaves_entitled - employee.leaves_taken;
-    if (daysRequested > remainingLeaves) {
-      return res.status(400).json({ 
-        error: 'Insufficient leave balance',
-        available: remainingLeaves,
-        requested: daysRequested
-      });
-    }
-    
-    // Insert leave application
-    const result = await pool.query(`
-      INSERT INTO leave_applications (
-        employee_id, leave_type, start_date, end_date, 
-        days_requested, reason, status
-      ) VALUES ($1, $2, $3, $4, $5, $6, 'pending')
-      RETURNING *
-    `, [employeeId, leaveType, startDate, endDate, daysRequested, reason]);
-    
-    console.log('✅ Leave application created:', result.rows[0].id);
-    res.status(201).json(result.rows[0]);
-  } catch (error) {
-    console.error('❌ Error creating leave application:', error);
-    res.status(500).json({ error: 'Failed to create leave application' });
-  }
-});
-
-// Approve/Reject leave application
 app.patch('/api/leave-applications/:id', async (req, res) => {
   try {
     const { id } = req.params;
     const { status, approvedBy, rejectionReason } = req.body;
-    
-    // Validate status
-    if (!['approved', 'rejected'].includes(status)) {
-      return res.status(400).json({ error: 'Invalid status' });
-    }
-    
-    // Get leave application
+
+    console.log(`📝 Updating leave application ${id} to status: ${status}`);
+
+    // Get leave application details first
     const leaveResult = await pool.query(
-      'SELECT * FROM leave_applications WHERE id = $1',
+      'SELECT la.*, e.* FROM leave_applications la JOIN employees e ON la.employee_id = e.id WHERE la.id = $1',
       [id]
     );
     
@@ -436,8 +476,14 @@ app.patch('/api/leave-applications/:id', async (req, res) => {
         WHERE id = $2
       `, [leave.days_requested, leave.employee_id]);
       
+      // Send approval email
+      await sendLeaveApprovalEmail(result.rows[0], leave);
+      
       console.log('✅ Leave approved and balance updated');
-    } else {
+    } else if (status === 'rejected') {
+      // Send rejection email
+      await sendLeaveRejectionEmail(result.rows[0], leave, rejectionReason);
+      
       console.log('❌ Leave rejected');
     }
     
@@ -450,7 +496,6 @@ app.patch('/api/leave-applications/:id', async (req, res) => {
 
 // ==================== ANALYTICS ====================
 
-// Get dashboard stats for owners
 app.get('/api/analytics/dashboard', async (req, res) => {
   try {
     // Total employees
@@ -497,20 +542,22 @@ app.get('/api/health', (req, res) => {
   res.json({ 
     status: 'healthy', 
     timestamp: new Date().toISOString(),
-    totalEmployees: getAllEmployees().length
+    totalEmployees: getAllEmployees().length,
+    sendgridConfigured: !!process.env.SENDGRID_API_KEY
   });
 });
 
 app.get('/', (req, res) => {
   res.json({ 
     message: 'SOEN Leave Management API',
-    version: '2.0',
+    version: '2.1 - With Email Notifications',
     endpoints: {
       auth: '/api/auth/*',
       employees: '/api/employees',
       leaves: '/api/leave-applications',
       analytics: '/api/analytics/dashboard'
-    }
+    },
+    emailsEnabled: !!process.env.SENDGRID_API_KEY
   });
 });
 
@@ -524,6 +571,7 @@ app.listen(PORT, () => {
   console.log(`👑 Owners: ${EMPLOYEE_STRUCTURE.owners.length}`);
   console.log(`⚙️  Managers: ${EMPLOYEE_STRUCTURE.managers.length}`);
   console.log(`👤 Employees: ${EMPLOYEE_STRUCTURE.employees.length}`);
+  console.log(`📧 SendGrid: ${process.env.SENDGRID_API_KEY ? '✅ Configured' : '❌ Not configured'}`);
   console.log('🚀 ========================================');
 });
 
