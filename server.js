@@ -289,6 +289,33 @@ app.post('/api/auth/microsoft/callback', async (req, res) => {
   }
 });
 
+# 🔧 BACKEND: ADD PASSWORD RESET ENDPOINTS
+
+## ✅ **Frontend Status**
+
+The password reset page is working perfectly! The "Server error" you see is expected because the backend endpoints haven't been added yet.
+
+**What's Working:**
+- ✅ "Forgot Password?" link on login page
+- ✅ Email form and modal
+- ✅ reset-password.html page loads
+- ✅ Token verification attempt
+- ✅ Form validation
+
+**What Needs Backend:**
+- ⏳ Token verification endpoint
+- ⏳ Password reset endpoint
+- ⏳ Email sending
+
+---
+
+## 📦 **Backend Code to Add**
+
+Add this code to your `server.js` file on Render:
+
+### **Location:** After the Microsoft OAuth section, before other API routes
+
+```javascript
 // ==================== PASSWORD RESET ENDPOINTS ====================
 
 const crypto = require('crypto');
@@ -518,6 +545,238 @@ app.post('/api/auth/change-password', async (req, res) => {
     res.status(500).json({ message: 'Server error' });
   }
 });
+```
+
+---
+
+## 🚀 **Deployment Steps**
+
+### **Step 1: Access Render**
+1. Go to https://render.com
+2. Login to your account
+3. Find your `soen-leave-management` service
+4. Click on it
+
+### **Step 2: Edit server.js**
+1. Click "Shell" tab (or use your preferred method)
+2. Or edit via GitHub if connected
+3. Open `server.js`
+
+### **Step 3: Add the Code**
+1. Find the line: `// ==================== MICROSOFT OAUTH ====================`
+2. Scroll down to after the Microsoft OAuth section
+3. Add the password reset endpoints code above
+4. Save the file
+
+### **Step 4: Deploy**
+1. Render will auto-deploy when you commit
+2. Or click "Manual Deploy" → "Deploy latest commit"
+3. Wait 2-3 minutes for deployment
+4. Check logs for "✅ Deployed successfully"
+
+### **Step 5: Test**
+1. Go to login page
+2. Click "Forgot Password?"
+3. Enter email
+4. Check email
+5. Click reset link
+6. **Should now work without "Server error"!** ✅
+
+---
+
+## 🧪 **Testing After Deployment**
+
+### **Test 1: Request Reset**
+```
+POST https://soen-leave-management.onrender.com/api/auth/reset-password
+Body: { "email": "rajesh@soenaudio.com" }
+
+Expected: { "message": "Password reset link sent to your email" }
+```
+
+### **Test 2: Verify Token**
+```
+GET https://soen-leave-management.onrender.com/api/auth/verify-reset-token/YOUR_TOKEN
+
+Expected: { "valid": true, "email": "rajesh@soenaudio.com" }
+```
+
+### **Test 3: Complete Reset**
+```
+POST https://soen-leave-management.onrender.com/api/auth/complete-reset
+Body: { "token": "YOUR_TOKEN", "newPassword": "newpassword123" }
+
+Expected: { "message": "Password reset successful" }
+```
+
+### **Test 4: Change Password**
+```
+POST https://soen-leave-management.onrender.com/api/auth/change-password
+Body: { 
+  "email": "rajesh@soenaudio.com",
+  "currentPassword": "oldpass123",
+  "newPassword": "newpass123"
+}
+
+Expected: { "message": "Password changed successfully" }
+```
+
+---
+
+## 📧 **Email Templates**
+
+The backend will send these emails:
+
+### **1. Password Reset Request**
+- Subject: "Password Reset Request - SOEN Audio"
+- Contains: Reset button + plain link
+- Expiry: 1 hour warning
+- Security note included
+
+### **2. Password Changed Confirmation**
+- Subject: "Password Changed - SOEN Audio"
+- Contains: Success message
+- Security alert if not initiated by user
+
+---
+
+## 🔒 **Security Features**
+
+✅ **Token Management:**
+- Random 32-byte tokens
+- 1-hour expiry
+- Single-use (deleted after use)
+- Stored server-side
+
+✅ **Password Validation:**
+- Minimum 8 characters (both client and server)
+- Current password verification (for change)
+- Match confirmation required
+
+✅ **Email Security:**
+- Generic responses (don't reveal if email exists)
+- SendGrid secure delivery
+- Confirmation emails
+
+---
+
+## 📊 **What Happens After Backend Added**
+
+### **Complete Flow:**
+```
+1. User clicks "Forgot Password?" ✅
+2. Enters email → Submit ✅
+3. Backend generates token → Sends email ✅ (NEW!)
+4. User clicks link in email ✅
+5. Token verified by backend ✅ (NEW!)
+6. User enters new password ✅
+7. Backend updates password ✅ (NEW!)
+8. Success! User can login ✅
+```
+
+---
+
+## 🆘 **Troubleshooting**
+
+### **"Server error" still appears:**
+- Check Render logs for errors
+- Verify endpoints are deployed
+- Test endpoints with Postman/curl
+- Check API_URL in frontend matches backend
+
+### **Email not sending:**
+- Verify SendGrid API key is set
+- Check Render environment variables
+- Look for email errors in logs
+- Test sendEmail function separately
+
+### **Token not working:**
+- Check if token is being generated
+- Verify token expiry logic
+- Check resetTokens Map is working
+- Consider using database for tokens in production
+
+---
+
+## 🎯 **Production Improvements** (Optional)
+
+### **Current: In-Memory Tokens**
+```javascript
+const resetTokens = new Map();
+```
+
+**Issue:** Tokens lost if server restarts
+
+### **Better: Database Storage**
+```sql
+CREATE TABLE password_reset_tokens (
+  token VARCHAR(64) PRIMARY KEY,
+  email VARCHAR(255) NOT NULL,
+  expiry BIGINT NOT NULL,
+  created_at TIMESTAMP DEFAULT NOW()
+);
+```
+
+### **Best: Redis**
+```javascript
+// Use Redis with automatic expiry
+await redis.setex(token, 3600, email);
+```
+
+---
+
+## ✅ **Deployment Checklist**
+
+- [ ] Add `const crypto = require('crypto');` at top of server.js
+- [ ] Add all 4 password reset endpoints
+- [ ] Verify code placement (after Microsoft OAuth)
+- [ ] Save file
+- [ ] Deploy to Render
+- [ ] Wait for deployment to complete
+- [ ] Check logs for errors
+- [ ] Test password reset flow
+- [ ] Test change password feature
+- [ ] Verify emails are sent
+- [ ] Test token expiry
+
+---
+
+## 📞 **Support**
+
+**If you encounter issues:**
+- Check Render deployment logs
+- Verify all endpoints are added
+- Test each endpoint individually
+- Contact: rajesh@soenaudio.com
+
+---
+
+## 🎉 **Summary**
+
+**Frontend:** ✅ **COMPLETE** - Working perfectly!  
+**Backend:** ⏳ **CODE READY** - Just needs to be added to server.js  
+**Time to Deploy:** 15 minutes  
+**Difficulty:** Easy (copy/paste code)  
+
+**After deployment, the complete password reset flow will work end-to-end!** 🚀
+
+---
+
+## 📦 **Quick Reference**
+
+**Endpoints to Add:**
+- POST `/api/auth/reset-password` - Request reset
+- GET `/api/auth/verify-reset-token/:token` - Verify token
+- POST `/api/auth/complete-reset` - Set new password
+- POST `/api/auth/change-password` - Change password (logged in)
+
+**Where:** After Microsoft OAuth section in server.js  
+**Dependencies:** `crypto` (built-in, no install needed)  
+**Environment:** No new env vars needed (uses existing SendGrid)
+
+---
+
+**Copy the code above into your server.js and deploy!** 🎉
 ```
 
 ---
