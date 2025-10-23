@@ -193,6 +193,89 @@ async function sendLeaveRejectionEmail(leave, employee, reason) {
   return await sendEmail(employee.email, subject, html);
 }
 
+// ==================== EMAIL/PASSWORD LOGIN ====================
+
+// Email/Password Login
+app.post('/api/auth/login', async (req, res) => {
+  try {
+    const { email, password } = req.body;
+
+    console.log('Login attempt for:', email);
+
+    // Validate input
+    if (!email || !password) {
+      return res.status(400).json({ 
+        success: false, 
+        message: 'Email and password are required' 
+      });
+    }
+
+    // Find employee by email
+    const result = await pool.query(
+      'SELECT * FROM employees WHERE LOWER(email) = LOWER($1)',
+      [email]
+    );
+
+    if (result.rows.length === 0) {
+      console.log('Login failed: User not found');
+      return res.status(401).json({ 
+        success: false, 
+        message: 'Invalid email or password' 
+      });
+    }
+
+    const employee = result.rows[0];
+
+    // Check if password is set
+    if (!employee.password) {
+      console.log('Login failed: No password set for this user');
+      return res.status(401).json({ 
+        success: false, 
+        message: 'No password set. Please use "Forgot Password?" or login with Microsoft.' 
+      });
+    }
+
+    // Verify password (plain text comparison for now)
+    if (employee.password !== password) {
+      console.log('Login failed: Incorrect password');
+      return res.status(401).json({ 
+        success: false, 
+        message: 'Invalid email or password' 
+      });
+    }
+
+    // Success! Return employee data
+    console.log('Login successful for:', email);
+
+    res.json({
+      success: true,
+      message: 'Login successful',
+      employee: {
+        id: employee.id,
+        empNumber: employee.emp_number,
+        name: employee.name,
+        email: employee.email,
+        role: employee.role,
+        managerId: employee.manager_id,
+        leavesEntitled: employee.leaves_entitled,
+        leavesTaken: employee.leaves_taken,
+        casualLeave: employee.casual_leave,
+        sickLeave: employee.sick_leave,
+        earnedLeave: employee.earned_leave,
+        privilegeLeave: employee.privilege_leave
+      }
+    });
+
+  } catch (error) {
+    console.error('Login error:', error);
+    res.status(500).json({ 
+      success: false, 
+      message: 'Server error' 
+    });
+  }
+});
+
+
 // ==================== MICROSOFT OAUTH ====================
 
 app.post('/api/auth/microsoft/callback', async (req, res) => {
