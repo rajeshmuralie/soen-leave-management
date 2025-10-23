@@ -1124,6 +1124,418 @@ app.get('/', (req, res) => {
   });
 });
 
+
+// ==================== NEW FEATURES - BACKEND ENDPOINTS ====================
+// Add these to your server.js file (after the existing endpoints)
+
+// ==================== ADMIN ACTIVITY LOG ====================
+
+// Helper function to log admin actions
+async function logAdminAction(adminId, adminName, adminEmail, actionType, actionDescription, targetEmployeeId = null, targetEmployeeName = null, beforeValue = null, afterValue = null) {
+  try {
+    await pool.query(
+      `INSERT INTO admin_logs (
+        admin_id, admin_name, admin_email, action_type, action_description,
+        target_employee_id, target_employee_name, before_value, after_value
+      ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)`,
+      [adminId, adminName, adminEmail, actionType, actionDescription, targetEmployeeId, targetEmployeeName, beforeValue, afterValue]
+    );
+    console.log(`✅ Admin action logged: ${actionType} by ${adminName}`);
+  } catch (error) {
+    console.error('❌ Error logging admin action:', error);
+  }
+}
+
+// Get admin logs (with pagination and filtering)
+app.get('/api/admin/logs', async (req, res) => {
+  try {
+    const { page = 1, limit = 50, actionType, adminId, startDate, endDate } = req.query;
+    const offset = (page - 1) * limit;
+
+    let query = `
+      SELECT 
+        al.*,
+        e.emp_number as admin_emp_number
+      FROM admin_logs al
+      LEFT JOIN employees e ON al.admin_id = e.id
+      WHERE 1=1
+    `;
+    const params = [];
+    let paramCount = 0;
+
+    if (actionType) {
+      paramCount++;
+      query += ` AND al.action_type = $${paramCount}`;
+      params.push(actionType);
+    }
+
+    if (adminId) {
+      paramCount++;
+      query += ` AND al.admin_id = $${paramCount}`;
+      params.push(adminId);
+    }
+
+    if (startDate) {
+      paramCount++;
+      query += ` AND al.created_at >= $${paramCount}`;
+      params.push(startDate);
+    }
+
+    if (endDate) {
+      paramCount++;
+      query += ` AND al.created_at <= $${paramCount}`;
+      params.push(endDate);
+    }
+
+    query += ` ORDER BY al.created_at DESC LIMIT $${paramCount + 1} OFFSET $${paramCount + 2}`;
+    params.push(limit, offset);
+
+    const result = await pool.query(query, params);
+
+    // Get total count
+    const countQuery = `SELECT COUNT(*) FROM admin_logs WHERE 1=1`;
+    const countResult = await pool.query(countQuery);
+
+    res.json({
+      logs: result.rows,
+      total: parseInt(countResult.rows[0].count),
+      page: parseInt(page),
+      totalPages: Math.ceil(parseInt(countResult.rows[0].count) / limit)
+    });
+
+  } catch (error) {
+    console.error('❌ Error fetching admin logs:', error);
+    res.status(500).json({ message: 'Failed to fetch admin logs' });
+  }
+});
+
+
+// ==================== RESET ALL LEAVES ====================
+
+app.post('/api/admin/reset-leaves', async (req, res) => {
+  try {
+    const { adminId, adminName, adminEmail } = req.body;
+
+    console.log('🔄 Resetting all employee leaves...');
+
+    // Get all employees before reset (for logging)
+    const beforeResult = await pool.query('SELECT id, name, leaves_taken, casual_leave, sick_leave, earned_leave, privilege_leave FROM employees');
+    const beforeState = beforeResult.rows.map(emp => ({
+      id: emp.id,
+      name: emp.name,
+      before: `Taken: ${emp.leaves_taken}, CL: ${emp.casual_leave}, SL: ${emp.sick_leave}, EL: ${emp.earned_leave}, PL: ${emp.privilege_leave}`
+    }));
+
+    // Reset all leave balances (keep earned leave as is, reset others)
+    await pool.query(`
+      UPDATE employees SET
+        leaves_taken = 0,
+        casual_leave = 4,
+        sick_leave = 4,
+        privilege_leave = 4
+    `);
+
+    // Delete all leave applications (or mark them as archived)
+    await pool.query(`DELETE FROM leave_applications`);
+
+    console.log('✅ All employee leaves reset successfully');
+
+    // Log the admin action
+    await logAdminAction(
+      adminId,
+      adminName,
+      adminEmail,
+      'LEAVE_RESET',
+      'Reset all employee leaves to original values. Deleted all leave applications.',
+      null,
+      'All Employees',
+      JSON.stringify(beforeState),
+      'Leaves reset: CL=4, SL=4, PL=4, Taken=0. Earned leave preserved.'
+    );
+
+    // Update system settings
+    await pool.query(
+      `INSERT INTO system_settings (setting_key, setting_value, description, updated_by)
+       VALUES ('last_leave_reset', NOW()::TEXT, 'Last leave reset date', $1)
+       ON CONFLICT (setting_key) DO UPDATE SET 
+         setting_value = NOW()::TEXT, 
+         updated_by = $1,
+         updated_at = NOW()`,
+      [adminId]
+    );
+
+    res.json({
+      success: true,
+      message: 'All employee leaves have been reset successfully',
+      affectedEmployees: beforeState.length,
+      deletedApplications: true
+    });
+
+  } catch (error) {
+    console.error('❌ Error resetting leaves:', error);
+    res.status(500).json({ 
+      success: false, 
+      message: 'Failed to reset leaves' 
+    });
+  }
+});
+
+
+// ==================== CARRY FORWARD EARNED LEAVES ====================
+
+app.post('/api/admin/carryforward-leaves', async (req, res) => {
+  try {
+    const { adminId, adminName, adminEmail, newYear } = req.body;
+
+    console.log(`🔄 Carrying forward earned leaves to year ${newYear}...`);
+
+    // Get all employees with their current earned leave
+    const employeesResult = await pool.query(`
+      SELECT id, name, emp_number, earned_leave, carried_forward_leave
+      FROM employees
+    `);
+
+    const updates = [];
+
+    for (const emp of employeesResult.rows) {
+      // Store current earned leave as previous
+      const currentEarned = emp.earned_leave || 0;
+      const currentCarried = emp.carried_forward_leave || 0;
+      const totalToCarry = currentEarned + currentCarried;
+
+      // Update employee: carry forward earned leaves, reset other leaves
+      await pool.query(`
+        UPDATE employees SET
+          previous_earned_leave = earned_leave,
+          carried_forward_leave = $1,
+          earned_leave = 4,
+          casual_leave = 4,
+          sick_leave = 4,
+          privilege_leave = 4,
+          leaves_taken = 0,
+          leave_year = $2
+        WHERE id = $3
+      `, [totalToCarry, newYear, emp.id]);
+
+      updates.push({
+        empNumber: emp.emp_number,
+        name: emp.name,
+        carriedForward: totalToCarry
+      });
+
+      // Log individual carry forward
+      await logAdminAction(
+        adminId,
+        adminName,
+        adminEmail,
+        'LEAVE_CARRYFORWARD',
+        `Carried forward ${totalToCarry} earned leave days to year ${newYear}`,
+        emp.id,
+        emp.name,
+        `Earned: ${currentEarned}, Carried: ${currentCarried}`,
+        `New carried forward: ${totalToCarry}, Reset other leaves to 4`
+      );
+    }
+
+    console.log(`✅ Carried forward earned leaves for ${updates.length} employees`);
+
+    // Update system settings
+    await pool.query(
+      `UPDATE system_settings 
+       SET setting_value = $1, updated_by = $2, updated_at = NOW()
+       WHERE setting_key = 'current_leave_year'`,
+      [newYear.toString(), adminId]
+    );
+
+    res.json({
+      success: true,
+      message: `Earned leaves carried forward to ${newYear} successfully`,
+      updates: updates,
+      totalEmployees: updates.length
+    });
+
+  } catch (error) {
+    console.error('❌ Error carrying forward leaves:', error);
+    res.status(500).json({ 
+      success: false, 
+      message: 'Failed to carry forward leaves' 
+    });
+  }
+});
+
+
+// ==================== EXPORT EMPLOYEES TO EXCEL ====================
+
+app.get('/api/admin/export-employees', async (req, res) => {
+  try {
+    const { adminId, adminName, adminEmail } = req.query;
+
+    console.log('📊 Exporting employee data...');
+
+    // Get all employee data with manager names
+    const result = await pool.query(`
+      SELECT 
+        e.emp_number,
+        e.name,
+        e.email,
+        e.role,
+        m.name as manager_name,
+        e.leaves_entitled,
+        e.leaves_taken,
+        e.casual_leave,
+        e.sick_leave,
+        e.earned_leave,
+        e.privilege_leave,
+        e.carried_forward_leave,
+        e.previous_earned_leave,
+        e.leave_year,
+        e.working_days,
+        e.holidays,
+        e.created_at
+      FROM employees e
+      LEFT JOIN employees m ON e.manager_id = m.id
+      ORDER BY e.emp_number
+    `);
+
+    // Log the export action
+    if (adminId) {
+      await logAdminAction(
+        parseInt(adminId),
+        adminName,
+        adminEmail,
+        'EXPORT_DATA',
+        `Exported ${result.rows.length} employee records to Excel`,
+        null,
+        null,
+        null,
+        `${result.rows.length} records exported`
+      );
+    }
+
+    // Return data as JSON (will be converted to Excel on frontend)
+    res.json({
+      success: true,
+      data: result.rows,
+      timestamp: new Date().toISOString(),
+      totalRecords: result.rows.length
+    });
+
+  } catch (error) {
+    console.error('❌ Error exporting employees:', error);
+    res.status(500).json({ 
+      success: false, 
+      message: 'Failed to export employee data' 
+    });
+  }
+});
+
+
+// ==================== GET SYSTEM SETTINGS ====================
+
+app.get('/api/admin/settings', async (req, res) => {
+  try {
+    const result = await pool.query('SELECT * FROM system_settings');
+    
+    const settings = {};
+    result.rows.forEach(row => {
+      settings[row.setting_key] = {
+        value: row.setting_value,
+        description: row.description,
+        updatedAt: row.updated_at
+      };
+    });
+
+    res.json({ success: true, settings });
+
+  } catch (error) {
+    console.error('❌ Error fetching settings:', error);
+    res.status(500).json({ 
+      success: false, 
+      message: 'Failed to fetch settings' 
+    });
+  }
+});
+
+
+// ==================== ENHANCED EMPLOYEE UPDATE WITH LOGGING ====================
+
+// Update the existing employee update endpoint to include logging
+// Replace your existing PUT /api/employees/:id endpoint with this:
+
+app.put('/api/employees/:id', async (req, res) => {
+  try {
+    const { id } = req.params;
+    const updates = req.body;
+    const { adminId, adminName, adminEmail } = req.headers; // Pass admin info in headers
+
+    // Get current employee data for comparison
+    const beforeResult = await pool.query('SELECT * FROM employees WHERE id = $1', [id]);
+    const beforeData = beforeResult.rows[0];
+
+    // Build update query dynamically based on provided fields
+    const fields = [];
+    const values = [];
+    let paramCount = 0;
+
+    Object.keys(updates).forEach(key => {
+      if (updates[key] !== undefined && key !== 'id') {
+        paramCount++;
+        fields.push(`${key} = $${paramCount}`);
+        values.push(updates[key]);
+      }
+    });
+
+    if (fields.length === 0) {
+      return res.status(400).json({ message: 'No fields to update' });
+    }
+
+    values.push(id);
+    const query = `UPDATE employees SET ${fields.join(', ')} WHERE id = $${paramCount + 1} RETURNING *`;
+
+    const result = await pool.query(query, values);
+    const afterData = result.rows[0];
+
+    // Log the changes
+    if (adminId) {
+      const changes = [];
+      Object.keys(updates).forEach(key => {
+        if (beforeData[key] !== afterData[key]) {
+          changes.push(`${key}: ${beforeData[key]} → ${afterData[key]}`);
+        }
+      });
+
+      await logAdminAction(
+        parseInt(adminId),
+        adminName,
+        adminEmail,
+        'EMPLOYEE_UPDATE',
+        `Updated employee details: ${changes.join(', ')}`,
+        parseInt(id),
+        afterData.name,
+        JSON.stringify(beforeData),
+        JSON.stringify(afterData)
+      );
+    }
+
+    console.log('✅ Employee updated:', afterData.name);
+
+    res.json({
+      success: true,
+      message: 'Employee updated successfully',
+      employee: result.rows[0]
+    });
+
+  } catch (error) {
+    console.error('❌ Error updating employee:', error);
+    res.status(500).json({ 
+      success: false, 
+      message: 'Failed to update employee' 
+    });
+  }
+});
+
+
+
 // ==================== START SERVER ====================
 
 app.listen(PORT, () => {
