@@ -1210,72 +1210,82 @@ app.get('/api/admin/logs', async (req, res) => {
 });
 
 
-// ==================== RESET ALL LEAVES ====================
+// ==================== UPDATED RESET LEAVES ENDPOINT ====================
+// Replace the existing /api/admin/reset-leaves endpoint with this
 
 app.post('/api/admin/reset-leaves', async (req, res) => {
   try {
     const { adminId, adminName, adminEmail } = req.body;
 
-    console.log('🔄 Resetting all employee leaves...');
+    console.log('🔄 Reset All Leaves initiated by:', adminName);
 
-    // Get all employees before reset (for logging)
-    const beforeResult = await pool.query('SELECT id, name, leaves_taken, casual_leave, sick_leave, earned_leave, privilege_leave FROM employees');
-    const beforeState = beforeResult.rows.map(emp => ({
-      id: emp.id,
-      name: emp.name,
-      before: `Taken: ${emp.leaves_taken}, CL: ${emp.casual_leave}, SL: ${emp.sick_leave}, EL: ${emp.earned_leave}, PL: ${emp.privilege_leave}`
-    }));
+    // Start transaction
+    const client = await pool.connect();
+    
+    try {
+      await client.query('BEGIN');
 
-    // Reset all leave balances (keep earned leave as is, reset others)
-    await pool.query(`
-      UPDATE employees SET
-        leaves_taken = 0,
-        casual_leave = 4,
-        sick_leave = 4,
-        privilege_leave = 4
-    `);
+      // 1. Delete ALL leave applications
+      const deleteResult = await client.query('DELETE FROM leave_applications');
+      const deletedCount = deleteResult.rowCount;
 
-    // Delete all leave applications (or mark them as archived)
-    await pool.query(`DELETE FROM leave_applications`);
+      // 2. Reset leave balances to 0 (EXCEPT earned_leave)
+      const updateResult = await client.query(`
+        UPDATE employees 
+        SET 
+          casual_leave = 0,
+          sick_leave = 0,
+          privilege_leave = 0,
+          leaves_taken = 0,
+          leaves_entitled = 0
+        WHERE 1=1
+      `);
+      
+      const affectedEmployees = updateResult.rowCount;
 
-    console.log('✅ All employee leaves reset successfully');
+      // 3. Log the action
+      await client.query(`
+        INSERT INTO admin_logs (
+          admin_id, admin_name, admin_email, 
+          action_type, action_description, 
+          target_employee_id, target_employee_name
+        ) VALUES ($1, $2, $3, $4, $5, $6, $7)
+      `, [
+        adminId, 
+        adminName, 
+        adminEmail,
+        'RESET_LEAVES',
+        `Reset all leave balances to 0 (kept earned leaves). Deleted ${deletedCount} leave applications. Affected ${affectedEmployees} employees.`,
+        null,
+        'All Employees'
+      ]);
 
-    // Log the admin action
-    await logAdminAction(
-      adminId,
-      adminName,
-      adminEmail,
-      'LEAVE_RESET',
-      'Reset all employee leaves to original values. Deleted all leave applications.',
-      null,
-      'All Employees',
-      JSON.stringify(beforeState),
-      'Leaves reset: CL=4, SL=4, PL=4, Taken=0. Earned leave preserved.'
-    );
+      await client.query('COMMIT');
 
-    // Update system settings
-    await pool.query(
-      `INSERT INTO system_settings (setting_key, setting_value, description, updated_by)
-       VALUES ('last_leave_reset', NOW()::TEXT, 'Last leave reset date', $1)
-       ON CONFLICT (setting_key) DO UPDATE SET 
-         setting_value = NOW()::TEXT, 
-         updated_by = $1,
-         updated_at = NOW()`,
-      [adminId]
-    );
+      console.log('✅ Reset completed:', {
+        deletedApplications: deletedCount,
+        affectedEmployees: affectedEmployees
+      });
 
-    res.json({
-      success: true,
-      message: 'All employee leaves have been reset successfully',
-      affectedEmployees: beforeState.length,
-      deletedApplications: true
-    });
+      res.json({
+        success: true,
+        message: 'All leaves reset successfully. CL, SL, and Comp Off set to 0. Earned leaves kept unchanged.',
+        deletedApplications: deletedCount,
+        affectedEmployees: affectedEmployees
+      });
+
+    } catch (error) {
+      await client.query('ROLLBACK');
+      throw error;
+    } finally {
+      client.release();
+    }
 
   } catch (error) {
     console.error('❌ Error resetting leaves:', error);
-    res.status(500).json({ 
-      success: false, 
-      message: 'Failed to reset leaves' 
+    res.status(500).json({
+      success: false,
+      message: 'Failed to reset leaves: ' + error.message
     });
   }
 });
