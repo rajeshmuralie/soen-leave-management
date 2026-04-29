@@ -656,6 +656,7 @@ app.post('/api/employees', async (req, res) => {
       managerId,
       workingDays,
       holidays,
+      dateOfJoining,
       leavesEntitled,
       casualLeave,
       sickLeave,
@@ -666,7 +667,7 @@ app.post('/api/employees', async (req, res) => {
       compensatoryOff
     } = req.body;
 
-    console.log('📝 Creating new employee:', { name, email, role });
+    console.log('📝 Creating new employee:', { name, email, role, dateOfJoining });
 
     // Check if email already exists
     const emailCheck = await pool.query('SELECT id FROM employees WHERE email = $1', [email]);
@@ -685,10 +686,10 @@ app.post('/api/employees', async (req, res) => {
     const insertQuery = `
       INSERT INTO employees (
         emp_number, username, name, email, role, manager_id,
-        working_days, holidays, leaves_entitled, leaves_taken,
+        working_days, holidays, date_of_joining, leaves_entitled, leaves_taken,
         casual_leave, sick_leave, earned_leave, privilege_leave,
         maternity_leave, paternity_leave, compensatory_off, leave_without_pay
-      ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, 0, $10, $11, $12, $13, $14, $15, $16, 0)
+      ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, 0, $11, $12, $13, $14, $15, $16, $17, 0)
       RETURNING *
     `;
 
@@ -701,6 +702,7 @@ app.post('/api/employees', async (req, res) => {
       managerId || null,
       workingDays || 252,
       holidays || 12,
+      dateOfJoining || null,
       leavesEntitled || 24,
       casualLeave || 0,
       sickLeave || 0,
@@ -733,6 +735,7 @@ app.put('/api/employees/:id', async (req, res) => {
       managerId,
       workingDays,
       holidays,
+      dateOfJoining,
       leavesEntitled,
       leavesTaken,
       casualLeave,
@@ -745,7 +748,7 @@ app.put('/api/employees/:id', async (req, res) => {
       leaveWithoutPay
     } = req.body;
 
-    console.log('📝 Updating employee:', id);
+    console.log('📝 Updating employee:', id, 'DOJ:', dateOfJoining);
 
     // Check if employee exists
     const empCheck = await pool.query('SELECT * FROM employees WHERE id = $1', [id]);
@@ -769,18 +772,19 @@ app.put('/api/employees/:id', async (req, res) => {
         manager_id = $6,
         working_days = $7,
         holidays = $8,
-        leaves_entitled = $9,
-        leaves_taken = $10,
-        casual_leave = $11,
-        sick_leave = $12,
-        earned_leave = $13,
-        privilege_leave = $14,
-        maternity_leave = $15,
-        paternity_leave = $16,
-        compensatory_off = $17,
-        leave_without_pay = $18,
+        date_of_joining = $9,
+        leaves_entitled = $10,
+        leaves_taken = $11,
+        casual_leave = $12,
+        sick_leave = $13,
+        earned_leave = $14,
+        privilege_leave = $15,
+        maternity_leave = $16,
+        paternity_leave = $17,
+        compensatory_off = $18,
+        leave_without_pay = $19,
         updated_at = CURRENT_TIMESTAMP
-      WHERE id = $19
+      WHERE id = $20
       RETURNING *
     `;
 
@@ -793,6 +797,7 @@ app.put('/api/employees/:id', async (req, res) => {
       managerId || null,
       workingDays || 252,
       holidays || 12,
+      dateOfJoining || null,
       leavesEntitled || 24,
       leavesTaken || 0,
       casualLeave || 0,
