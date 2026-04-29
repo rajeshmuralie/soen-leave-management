@@ -657,6 +657,9 @@ app.post('/api/employees', async (req, res) => {
       workingDays,
       holidays,
       dateOfJoining,
+      workLocation,
+      annualElEntitlement,
+      probationMonths,
       leavesEntitled,
       casualLeave,
       sickLeave,
@@ -667,7 +670,21 @@ app.post('/api/employees', async (req, res) => {
       compensatoryOff
     } = req.body;
 
-    console.log('📝 Creating new employee:', { name, email, role, dateOfJoining });
+    console.log('📝 Creating new employee:', { name, email, role, workLocation, dateOfJoining });
+
+    // Validate work_location is set (mandatory)
+    if (!workLocation || !['india', 'outside_india'].includes(workLocation)) {
+      return res.status(400).json({ 
+        error: 'Work location is required. Must be either "india" or "outside_india".' 
+      });
+    }
+
+    // Validate date_of_joining is set (mandatory now)
+    if (!dateOfJoining) {
+      return res.status(400).json({ 
+        error: 'Date of Joining is required for accurate leave calculation.' 
+      });
+    }
 
     // Check if email already exists
     const emailCheck = await pool.query('SELECT id FROM employees WHERE email = $1', [email]);
@@ -683,13 +700,19 @@ app.post('/api/employees', async (req, res) => {
       }
     }
 
+    // For non-India employees, force EL fields to 0
+    const finalEarnedLeave = workLocation === 'india' ? (earnedLeave || 0) : 0;
+    const finalAnnualEl = workLocation === 'india' ? (annualElEntitlement || 12) : 0;
+
     const insertQuery = `
       INSERT INTO employees (
         emp_number, username, name, email, role, manager_id,
-        working_days, holidays, date_of_joining, leaves_entitled, leaves_taken,
+        working_days, holidays, date_of_joining, work_location,
+        annual_el_entitlement, probation_months,
+        leaves_entitled, leaves_taken,
         casual_leave, sick_leave, earned_leave, privilege_leave,
         maternity_leave, paternity_leave, compensatory_off, leave_without_pay
-      ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, 0, $11, $12, $13, $14, $15, $16, $17, 0)
+      ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, 0, $14, $15, $16, $17, $18, $19, 0, 0)
       RETURNING *
     `;
 
@@ -702,15 +725,17 @@ app.post('/api/employees', async (req, res) => {
       managerId || null,
       workingDays || 252,
       holidays || 12,
-      dateOfJoining || null,
-      leavesEntitled || 24,
-      casualLeave || 0,
+      dateOfJoining,
+      workLocation,
+      finalAnnualEl,
+      probationMonths || 0,
+      leavesEntitled || 12,
+      casualLeave || 12,
       sickLeave || 0,
-      earnedLeave || 0,
+      finalEarnedLeave,
       privilegeLeave || 0,
       maternityLeave || 0,
-      paternityLeave || 0,
-      compensatoryOff || 4
+      paternityLeave || 0
     ]);
 
     console.log('✅ Employee created successfully:', result.rows[0].id);
@@ -736,6 +761,9 @@ app.put('/api/employees/:id', async (req, res) => {
       workingDays,
       holidays,
       dateOfJoining,
+      workLocation,
+      annualElEntitlement,
+      probationMonths,
       leavesEntitled,
       leavesTaken,
       casualLeave,
@@ -748,7 +776,21 @@ app.put('/api/employees/:id', async (req, res) => {
       leaveWithoutPay
     } = req.body;
 
-    console.log('📝 Updating employee:', id, 'DOJ:', dateOfJoining);
+    console.log('📝 Updating employee:', id, 'Location:', workLocation, 'DOJ:', dateOfJoining);
+
+    // Validate work_location
+    if (!workLocation || !['india', 'outside_india'].includes(workLocation)) {
+      return res.status(400).json({ 
+        error: 'Work location is required. Must be either "india" or "outside_india".' 
+      });
+    }
+
+    // Validate date_of_joining
+    if (!dateOfJoining) {
+      return res.status(400).json({ 
+        error: 'Date of Joining is required.' 
+      });
+    }
 
     // Check if employee exists
     const empCheck = await pool.query('SELECT * FROM employees WHERE id = $1', [id]);
@@ -756,11 +798,36 @@ app.put('/api/employees/:id', async (req, res) => {
       return res.status(404).json({ error: 'Employee not found' });
     }
 
+    const existingEmployee = empCheck.rows[0];
+
     // Check if email is being changed to an existing one
     const emailCheck = await pool.query('SELECT id FROM employees WHERE email = $1 AND id != $2', [email, id]);
     if (emailCheck.rows.length > 0) {
       return res.status(400).json({ error: 'Email already exists' });
     }
+
+    // If location changed from india to outside_india, preserve EL history
+    if (existingEmployee.work_location === 'india' && workLocation === 'outside_india') {
+      const historyEntry = {
+        event: 'work_location_changed_to_outside_india',
+        date: new Date().toISOString().split('T')[0],
+        previous_earned_leave: existingEmployee.earned_leave,
+        previous_carried_forward: existingEmployee.carried_forward_leave,
+        previous_el_balance: existingEmployee.previous_earned_leave,
+        reason: 'Work location changed - EL no longer applicable',
+        timestamp: new Date().toISOString()
+      };
+      
+      await pool.query(`
+        UPDATE employees 
+        SET el_history_log = COALESCE(el_history_log, '[]'::jsonb) || $1::jsonb
+        WHERE id = $2
+      `, [JSON.stringify([historyEntry]), id]);
+    }
+
+    // For non-India employees, force EL fields to 0
+    const finalEarnedLeave = workLocation === 'india' ? (earnedLeave || 0) : 0;
+    const finalAnnualEl = workLocation === 'india' ? (annualElEntitlement || 12) : 0;
 
     const updateQuery = `
       UPDATE employees SET
@@ -773,18 +840,21 @@ app.put('/api/employees/:id', async (req, res) => {
         working_days = $7,
         holidays = $8,
         date_of_joining = $9,
-        leaves_entitled = $10,
-        leaves_taken = $11,
-        casual_leave = $12,
-        sick_leave = $13,
-        earned_leave = $14,
-        privilege_leave = $15,
-        maternity_leave = $16,
-        paternity_leave = $17,
-        compensatory_off = $18,
-        leave_without_pay = $19,
+        work_location = $10,
+        annual_el_entitlement = $11,
+        probation_months = $12,
+        leaves_entitled = $13,
+        leaves_taken = $14,
+        casual_leave = $15,
+        sick_leave = $16,
+        earned_leave = $17,
+        privilege_leave = $18,
+        maternity_leave = $19,
+        paternity_leave = $20,
+        compensatory_off = 0,
+        leave_without_pay = $21,
         updated_at = CURRENT_TIMESTAMP
-      WHERE id = $20
+      WHERE id = $22
       RETURNING *
     `;
 
@@ -797,16 +867,18 @@ app.put('/api/employees/:id', async (req, res) => {
       managerId || null,
       workingDays || 252,
       holidays || 12,
-      dateOfJoining || null,
-      leavesEntitled || 24,
+      dateOfJoining,
+      workLocation,
+      finalAnnualEl,
+      probationMonths || 0,
+      leavesEntitled || 12,
       leavesTaken || 0,
       casualLeave || 0,
       sickLeave || 0,
-      earnedLeave || 0,
+      finalEarnedLeave,
       privilegeLeave || 0,
       maternityLeave || 0,
       paternityLeave || 0,
-      compensatoryOff || 4,
       leaveWithoutPay || 0,
       id
     ]);
@@ -1549,6 +1621,251 @@ app.put('/api/employees/:id', async (req, res) => {
   }
 });
 
+
+
+
+// ==================== STAGE 2: HOLIDAYS & EL CALCULATION ENDPOINTS ====================
+
+// Get all public holidays for a year
+app.get('/api/holidays', async (req, res) => {
+  try {
+    const { year, country = 'india' } = req.query;
+    let query = 'SELECT * FROM public_holidays WHERE country = $1';
+    const params = [country];
+    
+    if (year) {
+      query += ' AND year = $2';
+      params.push(parseInt(year));
+    }
+    
+    query += ' ORDER BY holiday_date';
+    
+    const result = await pool.query(query, params);
+    res.json(result.rows);
+  } catch (error) {
+    console.error('❌ Error fetching holidays:', error);
+    res.status(500).json({ error: 'Failed to fetch holidays' });
+  }
+});
+
+// Add a single holiday (admin)
+app.post('/api/admin/holidays', async (req, res) => {
+  try {
+    const { holiday_date, holiday_name, country = 'india', adminEmail } = req.body;
+    
+    if (!holiday_date || !holiday_name) {
+      return res.status(400).json({ error: 'Date and name are required' });
+    }
+    
+    const year = new Date(holiday_date).getFullYear();
+    
+    const result = await pool.query(`
+      INSERT INTO public_holidays (holiday_date, holiday_name, country, year, created_by)
+      VALUES ($1, $2, $3, $4, $5)
+      ON CONFLICT (holiday_date, country) 
+      DO UPDATE SET holiday_name = $2, created_by = $5
+      RETURNING *
+    `, [holiday_date, holiday_name, country, year, adminEmail || 'admin']);
+    
+    console.log('✅ Holiday added:', holiday_date, holiday_name);
+    res.status(201).json(result.rows[0]);
+  } catch (error) {
+    console.error('❌ Error adding holiday:', error);
+    res.status(500).json({ error: 'Failed to add holiday', details: error.message });
+  }
+});
+
+// Bulk upload holidays (CSV format expected as array)
+app.post('/api/admin/holidays/bulk', async (req, res) => {
+  try {
+    const { holidays, country = 'india', adminEmail } = req.body;
+    
+    if (!holidays || !Array.isArray(holidays) || holidays.length === 0) {
+      return res.status(400).json({ error: 'holidays array is required' });
+    }
+    
+    let added = 0;
+    let updated = 0;
+    
+    for (const h of holidays) {
+      const year = new Date(h.holiday_date).getFullYear();
+      const result = await pool.query(`
+        INSERT INTO public_holidays (holiday_date, holiday_name, country, year, created_by)
+        VALUES ($1, $2, $3, $4, $5)
+        ON CONFLICT (holiday_date, country) 
+        DO UPDATE SET holiday_name = $2, created_by = $5
+        RETURNING (xmax = 0) as is_insert
+      `, [h.holiday_date, h.holiday_name, country, year, adminEmail || 'admin']);
+      
+      if (result.rows[0].is_insert) added++;
+      else updated++;
+    }
+    
+    console.log(`✅ Bulk holidays: ${added} added, ${updated} updated`);
+    res.json({ success: true, added, updated, total: holidays.length });
+  } catch (error) {
+    console.error('❌ Error bulk uploading holidays:', error);
+    res.status(500).json({ error: 'Failed to upload holidays', details: error.message });
+  }
+});
+
+// Delete a holiday
+app.delete('/api/admin/holidays/:id', async (req, res) => {
+  try {
+    const { id } = req.params;
+    await pool.query('DELETE FROM public_holidays WHERE id = $1', [id]);
+    res.json({ success: true });
+  } catch (error) {
+    console.error('❌ Error deleting holiday:', error);
+    res.status(500).json({ error: 'Failed to delete holiday' });
+  }
+});
+
+// Calculate working days between two dates
+app.get('/api/working-days', async (req, res) => {
+  try {
+    const { start_date, end_date, country = 'india' } = req.query;
+    
+    if (!start_date || !end_date) {
+      return res.status(400).json({ error: 'start_date and end_date required' });
+    }
+    
+    const result = await pool.query(
+      'SELECT calculate_working_days($1::DATE, $2::DATE, $3) as working_days',
+      [start_date, end_date, country]
+    );
+    
+    res.json({ working_days: parseInt(result.rows[0].working_days) });
+  } catch (error) {
+    console.error('❌ Error calculating working days:', error);
+    res.status(500).json({ error: 'Failed to calculate', details: error.message });
+  }
+});
+
+// Get EL breakdown for an employee
+app.get('/api/employees/:id/el-breakdown', async (req, res) => {
+  try {
+    const { id } = req.params;
+    
+    const empResult = await pool.query('SELECT * FROM employees WHERE id = $1', [id]);
+    if (empResult.rows.length === 0) {
+      return res.status(404).json({ error: 'Employee not found' });
+    }
+    
+    const emp = empResult.rows[0];
+    
+    if (emp.work_location !== 'india') {
+      return res.json({
+        eligible: false,
+        reason: 'Earned Leave only applies to India-based employees',
+        earned_leave: 0
+      });
+    }
+    
+    if (!emp.date_of_joining) {
+      return res.json({
+        eligible: false,
+        reason: 'Date of Joining not set',
+        earned_leave: 0
+      });
+    }
+    
+    const today = new Date().toISOString().split('T')[0];
+    
+    // Get working days
+    const wdResult = await pool.query(
+      'SELECT calculate_working_days($1::DATE, $2::DATE, $3) as wd',
+      [emp.date_of_joining, today, 'india']
+    );
+    const workingDays = parseInt(wdResult.rows[0].wd);
+    
+    // Get holidays in period
+    const holidaysResult = await pool.query(
+      `SELECT COUNT(*) as count FROM public_holidays 
+       WHERE country = 'india' 
+       AND holiday_date BETWEEN $1 AND $2
+       AND EXTRACT(DOW FROM holiday_date) NOT IN (0, 6)`,
+      [emp.date_of_joining, today]
+    );
+    const holidayCount = parseInt(holidaysResult.rows[0].count);
+    
+    const elExact = workingDays / 20;
+    const elRounded = Math.round(elExact);
+    const elFinal = Math.min(elRounded, 30);
+    
+    res.json({
+      eligible: true,
+      employee: emp.name,
+      date_of_joining: emp.date_of_joining,
+      calculation_date: today,
+      working_days: workingDays,
+      holidays_excluded: holidayCount,
+      el_exact: parseFloat(elExact.toFixed(2)),
+      el_rounded: elRounded,
+      el_final: elFinal,
+      capped_at_30: elRounded > 30,
+      formula: '1 EL per 20 working days (excluding weekends and India public holidays)'
+    });
+  } catch (error) {
+    console.error('❌ Error calculating EL breakdown:', error);
+    res.status(500).json({ error: 'Failed to calculate', details: error.message });
+  }
+});
+
+// Manually trigger EL recalculation for all India employees
+app.post('/api/admin/recalculate-el', async (req, res) => {
+  try {
+    const { adminEmail } = req.body;
+    
+    console.log('🔄 Recalculating EL for all India employees...');
+    
+    const result = await pool.query(`
+      UPDATE employees 
+      SET 
+        earned_leave = calculate_employee_el(id, CURRENT_DATE)::INTEGER,
+        el_accrued_total = calculate_employee_el(id, CURRENT_DATE),
+        last_el_calculation_date = CURRENT_DATE,
+        updated_at = CURRENT_TIMESTAMP
+      WHERE work_location = 'india' 
+        AND date_of_joining IS NOT NULL
+      RETURNING id, name, earned_leave, el_accrued_total
+    `);
+    
+    // Log the action
+    await pool.query(`
+      INSERT INTO admin_logs (admin_name, admin_email, action_type, action_description)
+      VALUES ($1, $2, 'EL_RECALCULATION', $3)
+    `, [
+      adminEmail || 'system',
+      adminEmail || 'system@soenaudio.com',
+      `Recalculated EL for ${result.rowCount} India employees`
+    ]);
+    
+    console.log(`✅ EL recalculated for ${result.rowCount} employees`);
+    res.json({
+      success: true,
+      employees_updated: result.rowCount,
+      details: result.rows
+    });
+  } catch (error) {
+    console.error('❌ Error recalculating EL:', error);
+    res.status(500).json({ error: 'Failed to recalculate', details: error.message });
+  }
+});
+
+// Get sick leave summary
+app.get('/api/employees/:id/sick-leaves', async (req, res) => {
+  try {
+    const { id } = req.params;
+    const result = await pool.query(
+      'SELECT name, sick_leaves_taken_ytd, work_location FROM employees WHERE id = $1',
+      [id]
+    );
+    res.json(result.rows[0] || {});
+  } catch (error) {
+    res.status(500).json({ error: 'Failed' });
+  }
+});
 
 
 // ==================== START SERVER ====================
