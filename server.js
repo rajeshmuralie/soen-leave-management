@@ -262,7 +262,11 @@ app.post('/api/auth/login', async (req, res) => {
         casualLeave: employee.casual_leave,
         sickLeave: employee.sick_leave,
         earnedLeave: employee.earned_leave,
-        privilegeLeave: employee.privilege_leave
+        privilegeLeave: employee.privilege_leave,
+        work_location: employee.work_location,
+        workLocation: employee.work_location,
+        date_of_joining: employee.date_of_joining,
+        sick_leaves_taken_ytd: employee.sick_leaves_taken_ytd
       }
     });
 
@@ -364,7 +368,11 @@ app.post('/api/auth/microsoft/callback', async (req, res) => {
         casualLeave: userData.casual_leave,
         sickLeave: userData.sick_leave,
         earnedLeave: userData.earned_leave,
-        privilegeLeave: userData.privilege_leave
+        privilegeLeave: userData.privilege_leave,
+        work_location: userData.work_location,
+        workLocation: userData.work_location,
+        date_of_joining: userData.date_of_joining,
+        sick_leaves_taken_ytd: userData.sick_leaves_taken_ytd
       }
     });
   } catch (error) {
