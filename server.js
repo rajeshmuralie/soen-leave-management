@@ -292,51 +292,22 @@ app.post('/api/auth/microsoft/callback', async (req, res) => {
 
     console.log('🔐 Microsoft OAuth callback received for:', email);
 
-    // Find employee in our structure
-    const employeeInStructure = findEmployeeByEmail(email);
-    
-    if (!employeeInStructure) {
-      console.log('❌ Employee not found in structure:', email);
-      return res.status(404).json({ error: 'Employee not found in organization' });
-    }
-
-    console.log('✅ Employee found in structure:', employeeInStructure.name);
-
-    // Check if employee exists in database
+    // Look up employee in database (case-insensitive)
+    // Database is the single source of truth - employees must be added via admin panel first
     const result = await pool.query(
       'SELECT * FROM employees WHERE LOWER(email) = LOWER($1)',
       [email]
     );
 
-    let userData;
-
     if (result.rows.length === 0) {
-      // Employee exists in structure but not in database - auto-create
-      console.log('📝 Creating employee in database:', email);
-      
-      const insertResult = await pool.query(`
-        INSERT INTO employees (
-          emp_number, username, name, email, role, manager_id,
-          working_days, holidays, leaves_entitled, leaves_taken,
-          casual_leave, sick_leave, earned_leave, privilege_leave
-        ) VALUES ($1, $2, $3, $4, $5, $6, 260, 15, $7, 0, 4, 4, 4, 4)
-        RETURNING *
-      `, [
-        `EMP${employeeInStructure.id.toString().padStart(3, '0')}`,
-        employeeInStructure.name.toLowerCase().split(' ')[0],
-        employeeInStructure.name,
-        employeeInStructure.email,
-        employeeInStructure.role,
-        employeeInStructure.managerId,
-        employeeInStructure.role === 'owner' ? 30 : employeeInStructure.role === 'admin' ? 25 : 20
-      ]);
-
-      userData = insertResult.rows[0];
-      console.log('✅ Employee created in database');
-    } else {
-      userData = result.rows[0];
-      console.log('✅ Employee found in database');
+      console.log('❌ Employee not found in database:', email);
+      return res.status(404).json({ 
+        error: 'Employee not found in organization. Please contact your administrator to be added to the system.' 
+      });
     }
+
+    const userData = result.rows[0];
+    console.log('✅ Employee found in database:', userData.name);
 
     // Find manager details
     let managerData = null;
@@ -675,7 +646,11 @@ app.post('/api/employees', async (req, res) => {
       privilegeLeave,
       maternityLeave,
       paternityLeave,
-      compensatoryOff
+      compensatoryOff,
+      // Admin context for audit logging (optional - logging is best-effort)
+      adminId,
+      adminName,
+      adminEmail
     } = req.body;
 
     console.log('📝 Creating new employee:', { name, email, role, workLocation, dateOfJoining });
@@ -694,8 +669,8 @@ app.post('/api/employees', async (req, res) => {
       });
     }
 
-    // Check if email already exists
-    const emailCheck = await pool.query('SELECT id FROM employees WHERE email = $1', [email]);
+    // Check if email already exists (case-insensitive)
+    const emailCheck = await pool.query('SELECT id FROM employees WHERE LOWER(email) = LOWER($1)', [email]);
     if (emailCheck.rows.length > 0) {
       return res.status(400).json({ error: 'Email already exists' });
     }
@@ -747,6 +722,22 @@ app.post('/api/employees', async (req, res) => {
     ]);
 
     console.log('✅ Employee created successfully:', result.rows[0].id);
+
+    // Audit log: best-effort, doesn't fail the request if logging fails
+    if (adminId || adminEmail) {
+      await logAdminAction(
+        adminId ? parseInt(adminId) : null,
+        adminName || 'Unknown Admin',
+        adminEmail || null,
+        'CREATE_EMPLOYEE',
+        `Added new employee: ${name} (${email}), Role: ${role}, Work Location: ${workLocation}, DOJ: ${dateOfJoining}`,
+        result.rows[0].id,
+        name,
+        null,
+        JSON.stringify(result.rows[0])
+      );
+    }
+
     res.status(201).json(result.rows[0]);
   } catch (error) {
     console.error('❌ Error creating employee:', error);
@@ -781,7 +772,11 @@ app.put('/api/employees/:id', async (req, res) => {
       maternityLeave,
       paternityLeave,
       compensatoryOff,
-      leaveWithoutPay
+      leaveWithoutPay,
+      // Admin context for audit logging (optional - logging is best-effort)
+      adminId,
+      adminName,
+      adminEmail
     } = req.body;
 
     console.log('📝 Updating employee:', id, 'Location:', workLocation, 'DOJ:', dateOfJoining);
@@ -808,8 +803,8 @@ app.put('/api/employees/:id', async (req, res) => {
 
     const existingEmployee = empCheck.rows[0];
 
-    // Check if email is being changed to an existing one
-    const emailCheck = await pool.query('SELECT id FROM employees WHERE email = $1 AND id != $2', [email, id]);
+    // Check if email is being changed to an existing one (case-insensitive)
+    const emailCheck = await pool.query('SELECT id FROM employees WHERE LOWER(email) = LOWER($1) AND id != $2', [email, id]);
     if (emailCheck.rows.length > 0) {
       return res.status(400).json({ error: 'Email already exists' });
     }
@@ -892,6 +887,46 @@ app.put('/api/employees/:id', async (req, res) => {
     ]);
 
     console.log('✅ Employee updated successfully:', id);
+
+    // Audit log: compute field-level diff for clarity, best-effort
+    if (adminId || adminEmail) {
+      const afterData = result.rows[0];
+      const changes = [];
+      const trackedFields = [
+        'emp_number', 'username', 'name', 'email', 'role', 'manager_id',
+        'working_days', 'holidays', 'date_of_joining', 'work_location',
+        'annual_el_entitlement', 'probation_months', 'leaves_entitled',
+        'leaves_taken', 'casual_leave', 'sick_leave', 'earned_leave',
+        'privilege_leave', 'maternity_leave', 'paternity_leave', 'leave_without_pay'
+      ];
+      trackedFields.forEach(field => {
+        const before = existingEmployee[field];
+        const after = afterData[field];
+        // Normalize for comparison (dates come back as Date objects, etc.)
+        const beforeStr = before === null || before === undefined ? '' : String(before);
+        const afterStr = after === null || after === undefined ? '' : String(after);
+        if (beforeStr !== afterStr) {
+          changes.push(`${field}: ${beforeStr || 'null'} → ${afterStr || 'null'}`);
+        }
+      });
+
+      const description = changes.length > 0
+        ? `Updated ${afterData.name}: ${changes.join('; ')}`
+        : `Updated employee record for ${afterData.name} (no field changes detected)`;
+
+      await logAdminAction(
+        adminId ? parseInt(adminId) : null,
+        adminName || 'Unknown Admin',
+        adminEmail || null,
+        'EDIT_EMPLOYEE',
+        description,
+        parseInt(id),
+        afterData.name,
+        JSON.stringify(existingEmployee),
+        JSON.stringify(afterData)
+      );
+    }
+
     res.json(result.rows[0]);
   } catch (error) {
     console.error('❌ Error updating employee:', error);
@@ -904,6 +939,8 @@ app.put('/api/employees/:id', async (req, res) => {
 app.delete('/api/employees/:id', async (req, res) => {
   try {
     const { id } = req.params;
+    // Admin context for audit logging (optional - logging is best-effort)
+    const { adminId, adminName, adminEmail } = req.body || {};
 
     console.log('🗑️  Deleting employee:', id);
 
@@ -912,6 +949,8 @@ app.delete('/api/employees/:id', async (req, res) => {
     if (empCheck.rows.length === 0) {
       return res.status(404).json({ error: 'Employee not found' });
     }
+
+    const employeeToDelete = empCheck.rows[0];
 
     // Check if employee has pending leave applications
     const leaveCheck = await pool.query(
@@ -941,6 +980,22 @@ app.delete('/api/employees/:id', async (req, res) => {
     await pool.query('DELETE FROM employees WHERE id = $1', [id]);
 
     console.log('✅ Employee deleted successfully:', id);
+
+    // Audit log: best-effort, captures the deleted record in before_value
+    if (adminId || adminEmail) {
+      await logAdminAction(
+        adminId ? parseInt(adminId) : null,
+        adminName || 'Unknown Admin',
+        adminEmail || null,
+        'DELETE_EMPLOYEE',
+        `Deleted employee: ${employeeToDelete.name} (${employeeToDelete.email}, ${employeeToDelete.emp_number})`,
+        parseInt(id),
+        employeeToDelete.name,
+        JSON.stringify(employeeToDelete),
+        null
+      );
+    }
+
     res.json({ message: 'Employee deleted successfully' });
   } catch (error) {
     console.error('❌ Error deleting employee:', error);
@@ -1550,86 +1605,6 @@ app.get('/api/admin/settings', async (req, res) => {
     });
   }
 });
-
-
-// ==================== ENHANCED EMPLOYEE UPDATE WITH LOGGING ====================
-
-// Update the existing employee update endpoint to include logging
-// Replace your existing PUT /api/employees/:id endpoint with this:
-
-app.put('/api/employees/:id', async (req, res) => {
-  try {
-    const { id } = req.params;
-    const updates = req.body;
-    const { adminId, adminName, adminEmail } = req.headers; // Pass admin info in headers
-
-    // Get current employee data for comparison
-    const beforeResult = await pool.query('SELECT * FROM employees WHERE id = $1', [id]);
-    const beforeData = beforeResult.rows[0];
-
-    // Build update query dynamically based on provided fields
-    const fields = [];
-    const values = [];
-    let paramCount = 0;
-
-    Object.keys(updates).forEach(key => {
-      if (updates[key] !== undefined && key !== 'id') {
-        paramCount++;
-        fields.push(`${key} = $${paramCount}`);
-        values.push(updates[key]);
-      }
-    });
-
-    if (fields.length === 0) {
-      return res.status(400).json({ message: 'No fields to update' });
-    }
-
-    values.push(id);
-    const query = `UPDATE employees SET ${fields.join(', ')} WHERE id = $${paramCount + 1} RETURNING *`;
-
-    const result = await pool.query(query, values);
-    const afterData = result.rows[0];
-
-    // Log the changes
-    if (adminId) {
-      const changes = [];
-      Object.keys(updates).forEach(key => {
-        if (beforeData[key] !== afterData[key]) {
-          changes.push(`${key}: ${beforeData[key]} → ${afterData[key]}`);
-        }
-      });
-
-      await logAdminAction(
-        parseInt(adminId),
-        adminName,
-        adminEmail,
-        'EMPLOYEE_UPDATE',
-        `Updated employee details: ${changes.join(', ')}`,
-        parseInt(id),
-        afterData.name,
-        JSON.stringify(beforeData),
-        JSON.stringify(afterData)
-      );
-    }
-
-    console.log('✅ Employee updated:', afterData.name);
-
-    res.json({
-      success: true,
-      message: 'Employee updated successfully',
-      employee: result.rows[0]
-    });
-
-  } catch (error) {
-    console.error('❌ Error updating employee:', error);
-    res.status(500).json({ 
-      success: false, 
-      message: 'Failed to update employee' 
-    });
-  }
-});
-
-
 
 
 // ==================== STAGE 2: HOLIDAYS & EL CALCULATION ENDPOINTS ====================
